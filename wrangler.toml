@@ -9,8 +9,8 @@ bindings = [
 ]
 
 [[migrations]]
-tag = "v1"
-new_classes = ["Counter"]
+tag = "v2"
+new_sqlite_classes = ["Counter"]
 
 [observability.logs]
 enabled = true
