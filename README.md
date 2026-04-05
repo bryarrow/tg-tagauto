@@ -85,6 +85,9 @@ npm run worker:dev
 - 把计数器 `+1`
 - 将这个新的计数器值按昵称当前数字的原格式写回昵称
 
+此外，Worker 已配置定时任务，会在每天北京时间 `00:00` 自动执行一次和 `POST /bump` 相同的逻辑。
+Cloudflare Cron 使用 UTC，因此配置值是 `0 16 * * *`，对应 UTC+8 的次日 `00:00`。
+
 例如：
 
 - `Berry²` bump 后会变成 `Berry³`

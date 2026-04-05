@@ -387,6 +387,45 @@ async function bumpProfileAndCounter(
   };
 }
 
+async function runBump(env: Env): Promise<WorkerResponseBody | Response> {
+  ensureWorkerShims();
+
+  const clientResult = await createClient(env);
+
+  if (!clientResult.ok) {
+    return clientResult.error;
+  }
+
+  const { client, Api } = clientResult;
+
+  try {
+    await client.connect();
+
+    if (!(await client.isUserAuthorized())) {
+      console.error("Worker failed: TG_SESSION is not authorized.");
+      return new Response("TG_SESSION is not authorized.", { status: 401 });
+    }
+
+    const me = await client.getMe();
+
+    if (!(me instanceof Api.User)) {
+      console.error("Worker failed: session does not belong to a Telegram user account.");
+      return new Response("The session does not belong to a Telegram user account.", {
+        status: 400
+      });
+    }
+
+    return await bumpProfileAndCounter(env, client, Api, me.firstName ?? "", me.lastName ?? "");
+  } catch (error) {
+    console.error("Worker failed:", error);
+    return new Response("Failed to bump Telegram nickname. Check Worker logs.", {
+      status: 500
+    });
+  } finally {
+    await client.disconnect();
+  }
+}
+
 const fetchHandler: ExportedHandlerFetchHandler<Env> = async (
   request: Request,
   env: Env
@@ -454,8 +493,31 @@ const fetchHandler: ExportedHandlerFetchHandler<Env> = async (
   }
 };
 
+const scheduledHandler: ExportedHandlerScheduledHandler<Env> = async (
+  controller: ScheduledController,
+  env: Env,
+  _ctx: ExecutionContext
+): Promise<void> => {
+  const result = await runBump(env);
+
+  if (result instanceof Response) {
+    console.error("Scheduled bump failed:", {
+      cron: controller.cron,
+      status: result.status
+    });
+    return;
+  }
+
+  console.log("Scheduled bump succeeded:", {
+    cron: controller.cron,
+    count: result.count,
+    extracted: result.extracted
+  });
+};
+
 const worker: ExportedHandler<Env> = {
-  fetch: fetchHandler
+  fetch: fetchHandler,
+  scheduled: scheduledHandler
 };
 
 export default worker;

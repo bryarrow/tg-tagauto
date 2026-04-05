@@ -3,6 +3,9 @@ main = "src/worker.ts"
 compatibility_date = "2026-04-05"
 compatibility_flags = ["nodejs_compat"]
 
+[triggers]
+crons = ["0 16 * * *"]
+
 [durable_objects]
 bindings = [
   { name = "COUNTER", class_name = "Counter" }
