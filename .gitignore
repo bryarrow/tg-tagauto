@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-worker/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Tooling caches
+.wrangler/
+
+# Editor settings
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
