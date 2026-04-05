@@ -1,0 +1,7 @@
+name = "tg-tagauto"
+main = "src/worker.ts"
+compatibility_date = "2026-04-05"
+compatibility_flags = ["nodejs_compat"]
+
+[observability.logs]
+enabled = true

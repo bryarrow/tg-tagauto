@@ -1,0 +1,25 @@
+{
+  "name": "tg-tagauto",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GramJS Telegram user info example for Cloudflare Workers",
+  "main": "dist/src/generate-session.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
+    "generate:session": "ts-node src/generate-session.ts",
+    "worker:dev": "wrangler dev",
+    "worker:check": "wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "buffer": "^6.0.3",
+    "dotenv": "^16.6.1",
+    "telegram": "^2.26.22"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260405.1",
+    "@types/node": "^24.6.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.11.1"
+  }
+}
