@@ -2,6 +2,7 @@ export interface Env {
   TG_API_ID: string;
   TG_API_HASH: string;
   TG_SESSION: string;
+  AUTH_TOKEN?: string;
   NAME_EXTRACT_REGEX?: string;
   NAME_EXTRACT_SOURCE?: string;
   MEMBER_TAG_EXTRACT_REGEX?: string;

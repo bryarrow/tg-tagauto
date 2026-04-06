@@ -78,6 +78,7 @@ npm run worker:check
 wrangler secret put TG_API_ID
 wrangler secret put TG_API_HASH
 wrangler secret put TG_SESSION
+wrangler secret put AUTH_TOKEN
 wrangler deploy
 ```
 
@@ -86,7 +87,7 @@ wrangler deploy
 ## 接口说明
 
 - `GET /`：读取昵称和群头衔，提取数字并同步计数器。
-- `POST /bump`：对昵称和群头衔中的数字各自加一，无法匹配时跳过。
+- `POST /bump`：对昵称和群头衔中的数字各自加一，无法匹配时跳过。必须携带请求头 `X-Auth-Token: <token>`。
 - `scheduled`：执行与 `POST /bump` 相同的流程。
 
 返回字段：
@@ -105,6 +106,7 @@ wrangler deploy
 - `TG_API_ID`
 - `TG_API_HASH`
 - `TG_SESSION`
+- `AUTH_TOKEN`
 
 可选：
 
@@ -115,19 +117,30 @@ wrangler deploy
 
 `NAME_EXTRACT_SOURCE` 支持 `first_name`、`last_name`、`full_name`，默认 `full_name`。
 
+`AUTH_TOKEN` 用于保护 `POST /bump`。它应配置为一个随机长字符串，并通过请求头 `X-Auth-Token` 传入。
+
 示例：
 
 ```env
+AUTH_TOKEN=replace-with-a-long-random-string
 NAME_EXTRACT_REGEX=([⁰¹²³⁴⁵⁶⁷⁸⁹]+)$
 NAME_EXTRACT_SOURCE=full_name
 MEMBER_TAG_EXTRACT_REGEX=([⁰¹²³⁴⁵⁶⁷⁸⁹]+)$
 TG_GROUP_ID=-1001234567890
 ```
 
+调用示例：
+
+```bash
+curl -X POST "https://<your-worker>.workers.dev/bump" ^
+  -H "X-Auth-Token: <your-token>"
+```
+
 ## 注意事项
 
 - 首次登录必须在本地执行 `npm run generate:session`，Worker 里不能交互式输入验证码。
 - Worker 端只接受 mtcute 原生 `TG_SESSION`。
+- `POST /bump` 现在必须带 `X-Auth-Token`，否则会返回 `401`。
 - 正则如果带捕获组，优先使用第一个捕获组；否则使用整个匹配结果。
 - 只有提取结果里存在数字时，才会同步或递增计数器。
 - `full_name` 模式下，匹配范围不要跨越名和姓的边界，否则不会回写。

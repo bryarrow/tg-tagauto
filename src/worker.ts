@@ -6,6 +6,23 @@ import { extractFromName, extractFromText, replaceMatchedDigits, replaceNameDigi
 import { createClient, getAuthorizedUser, getCurrentMemberTag, MtcuteClient, updateCurrentMemberTag } from "./telegram";
 import { CounterKey, CounterState, Env, MemberTagState, WorkerResponseBody } from "./types";
 
+function authenticateBumpRequest(request: Request, env: Env): Response | null {
+  const expectedToken = env.AUTH_TOKEN?.trim();
+
+  if (!expectedToken) {
+    console.error("AUTH_TOKEN is missing.");
+    return new Response("AUTH_TOKEN is not configured.", { status: 500 });
+  }
+
+  const providedToken = request.headers.get("X-Auth-Token")?.trim();
+
+  if (providedToken !== expectedToken) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  return null;
+}
+
 async function syncCounterFromExtracted(env: Env, key: CounterKey, extracted: string): Promise<number | null> {
   const normalizedDigits = normalizeUnicodeDigits(extracted);
 
@@ -173,6 +190,15 @@ async function runBump(env: Env): Promise<WorkerResponseBody | Response> {
 const fetchHandler: ExportedHandlerFetchHandler<Env> = async (request, env): Promise<Response> => {
   try {
     const url = new URL(request.url);
+
+    if (request.method === "POST" && url.pathname === "/bump") {
+      const authError = authenticateBumpRequest(request, env);
+
+      if (authError) {
+        return authError;
+      }
+    }
+
     const result = await withTelegramClient(env, (client, me) => {
       if (request.method === "POST" && url.pathname === "/bump") {
         return bumpProfileAndCounter(env, client, me.firstName ?? "", me.lastName ?? "");
