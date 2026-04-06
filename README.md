@@ -25,7 +25,9 @@ copy .env.example .env
 - `TG_API_ID`
 - `TG_API_HASH`
 - `TG_SESSION`（需要先在本地生成，再配置到 Worker Secret）
-- `NAME_EXTRACT_REGEX`（用于从 `firstName + lastName` 中提取字符）
+- `NAME_EXTRACT_REGEX`（可选，用于从昵称提取字符）
+- `NAME_EXTRACT_SOURCE`（可选，指定从哪里提取昵称，支持 `first_name`、`last_name`、`full_name`，默认 `full_name`）
+- `MEMBER_TAG_EXTRACT_REGEX`（可选，用于从 member tag 中提取字符）
 - `TG_GROUP_ID`（可选，用于在 `GET /` 时读取当前账号在这个群里的 member tag）
 
 3. 本地生成 `TG_SESSION`：
@@ -59,6 +61,8 @@ copy .env.example .dev.vars
 - `TG_API_HASH`
 - `TG_SESSION`
 - `NAME_EXTRACT_REGEX`
+- `NAME_EXTRACT_SOURCE`
+- `MEMBER_TAG_EXTRACT_REGEX`
 
 ```bash
 npm run worker:dev
@@ -72,6 +76,7 @@ npm run worker:dev
 - `TG_API_HASH`
 - `TG_SESSION`
 - `NAME_EXTRACT_REGEX`
+- `NAME_EXTRACT_SOURCE`
 - `TG_GROUP_ID`（可选）
 - `COUNTER`（Durable Object，已在 `wrangler.toml` 中声明）
 
@@ -82,18 +87,26 @@ npm run worker:dev
 - `count`
 - `extracted`
 - `memberTag`
+- `memberTagCount`
+- `memberTagExtracted`
+- `memberTagError`
 
 其中：
 
-- `extracted` 是对 `firstName + lastName` 执行 `NAME_EXTRACT_REGEX` 后得到的结果
+- `extracted` 是对 `NAME_EXTRACT_SOURCE` 指定来源执行 `NAME_EXTRACT_REGEX` 后得到的结果；没匹配到时为 `null`
 - `count` 会被同步为昵称里提取出的 Unicode 数字对应的普通数字
 - `memberTag` 会读取 `TG_GROUP_ID` 指向的群，并返回当前账号在这个群里的自定义头衔
+- `memberTagExtracted` 会对 `memberTag` 执行 `MEMBER_TAG_EXTRACT_REGEX`；没匹配到时为 `null`
+- `memberTagCount` 会同步为 `memberTag` 里提取出的 Unicode 数字对应的普通数字
+- `memberTagError` 会返回读取或更新成员 tag 时遇到的错误
 - 如果正则包含捕获组，优先返回第一个捕获组；否则返回整个匹配内容
+- 如果没有配置对应正则，或者没匹配到数字，不会报错，也不会修改对应计数器
 
 `POST /bump` 会执行两个动作：
 
-- 把计数器 `+1`
-- 将这个新的计数器值按昵称当前数字的原格式写回昵称
+- 昵称能匹配到 `NAME_EXTRACT_REGEX` 且提取结果包含数字时，才会把昵称计数器 `+1` 并写回昵称
+- 成员 tag 能匹配到 `MEMBER_TAG_EXTRACT_REGEX` 且提取结果包含数字时，才会把成员 tag 计数器 `+1` 并写回成员 tag
+- 任意一边没匹配到时，会直接跳过，不做任何操作
 
 此外，Worker 已配置定时任务，会在每天北京时间 `00:00` 自动执行一次和 `POST /bump` 相同的逻辑。Cloudflare Cron 使用 UTC，因此配置值是 `0 16 * * *`，对应 UTC+8 的次日 `00:00`。
 
@@ -106,9 +119,11 @@ npm run worker:dev
 
 ```env
 NAME_EXTRACT_REGEX=([⁰¹²³⁴⁵⁶⁷⁸⁹]+)$
+NAME_EXTRACT_SOURCE=full_name
+MEMBER_TAG_EXTRACT_REGEX=([⁰¹²³⁴⁵⁶⁷⁸⁹]+)$
 ```
 
-如果姓名是 `Berry²`，则会提取末尾的上标数字。
+如果 `NAME_EXTRACT_SOURCE=full_name` 且姓名是 `Berry²`，则会提取末尾的上标数字。
 
 ## 限制
 

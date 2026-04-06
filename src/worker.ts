@@ -9,7 +9,9 @@ interface Env {
   TG_API_ID: string;
   TG_API_HASH: string;
   TG_SESSION: string;
-  NAME_EXTRACT_REGEX: string;
+  NAME_EXTRACT_REGEX?: string;
+  NAME_EXTRACT_SOURCE?: string;
+  MEMBER_TAG_EXTRACT_REGEX?: string;
   TG_GROUP_ID?: string;
   COUNTER: DurableObjectNamespace;
 }
@@ -27,10 +29,15 @@ interface CounterState {
   count: number;
 }
 
+type CounterKey = "name" | "memberTag";
+
 interface WorkerResponseBody {
-  count: number;
-  extracted: string;
+  count: number | null;
+  extracted: string | null;
   memberTag: string | null;
+  memberTagCount: number | null;
+  memberTagExtracted: string | null;
+  memberTagError: string | null;
 }
 
 async function createClient(env: Env): Promise<CreateClientResult> {
@@ -80,10 +87,14 @@ async function createClient(env: Env): Promise<CreateClientResult> {
   return { ok: true, client };
 }
 
-async function getCounter(env: Env): Promise<number> {
+function getCounterStub(env: Env) {
   const id = env.COUNTER.idFromName("global");
-  const stub = env.COUNTER.get(id);
-  const response = await stub.fetch("https://counter/value");
+  return env.COUNTER.get(id);
+}
+
+async function getCounter(env: Env, key: CounterKey): Promise<number> {
+  const stub = getCounterStub(env);
+  const response = await stub.fetch(`https://counter/value?key=${encodeURIComponent(key)}`);
 
   if (!response.ok) {
     throw new Error(`Counter read failed with status ${response.status}`);
@@ -93,10 +104,9 @@ async function getCounter(env: Env): Promise<number> {
   return data.count;
 }
 
-async function setCounter(env: Env, count: number): Promise<number> {
-  const id = env.COUNTER.idFromName("global");
-  const stub = env.COUNTER.get(id);
-  const response = await stub.fetch("https://counter/set", {
+async function setCounter(env: Env, key: CounterKey, count: number): Promise<number> {
+  const stub = getCounterStub(env);
+  const response = await stub.fetch(`https://counter/set?key=${encodeURIComponent(key)}`, {
     method: "POST",
     body: JSON.stringify({ count } satisfies CounterState),
     headers: {
@@ -112,10 +122,9 @@ async function setCounter(env: Env, count: number): Promise<number> {
   return data.count;
 }
 
-async function incrementCounter(env: Env): Promise<number> {
-  const id = env.COUNTER.idFromName("global");
-  const stub = env.COUNTER.get(id);
-  const response = await stub.fetch("https://counter/increment", {
+async function incrementCounter(env: Env, key: CounterKey): Promise<number> {
+  const stub = getCounterStub(env);
+  const response = await stub.fetch(`https://counter/increment?key=${encodeURIComponent(key)}`, {
     method: "POST"
   });
 
@@ -127,8 +136,46 @@ async function incrementCounter(env: Env): Promise<number> {
   return data.count;
 }
 
-function createNameRegex(env: Env): RegExp | null {
-  const pattern = env.NAME_EXTRACT_REGEX?.trim();
+async function getOptionalCounter(env: Env, key: CounterKey): Promise<number | null> {
+  try {
+    return await getCounter(env, key);
+  } catch (error) {
+    console.error(`Failed to read ${key} counter:`, error);
+    return null;
+  }
+}
+
+type RegexTarget = "name" | "memberTag";
+type NameExtractSource = "first_name" | "last_name" | "full_name";
+
+function getNameExtractSource(env: Env): NameExtractSource {
+  const source = env.NAME_EXTRACT_SOURCE?.trim().toLowerCase();
+
+  if (source === "first_name" || source === "last_name" || source === "full_name") {
+    return source;
+  }
+
+  return "full_name";
+}
+
+function getNameSourceText(env: Env, firstName: string, lastName: string): string {
+  const source = getNameExtractSource(env);
+
+  if (source === "first_name") {
+    return firstName;
+  }
+
+  if (source === "last_name") {
+    return lastName;
+  }
+
+  return `${firstName}${lastName}`.trim();
+}
+
+function createExtractRegex(env: Env, target: RegexTarget): RegExp | null {
+  const pattern = target === "name"
+    ? env.NAME_EXTRACT_REGEX?.trim()
+    : env.MEMBER_TAG_EXTRACT_REGEX?.trim();
 
   if (!pattern) {
     return null;
@@ -137,9 +184,8 @@ function createNameRegex(env: Env): RegExp | null {
   return new RegExp(pattern);
 }
 
-function extractFromName(env: Env, firstName: string, lastName: string): string | null {
-  const source = `${firstName}${lastName}`.trim();
-  const regex = createNameRegex(env);
+function extractFromText(env: Env, target: RegexTarget, source: string): string | null {
+  const regex = createExtractRegex(env, target);
 
   if (!regex) {
     return null;
@@ -148,10 +194,14 @@ function extractFromName(env: Env, firstName: string, lastName: string): string 
   const match = regex.exec(source);
 
   if (!match) {
-    return "";
+    return null;
   }
 
   return match[1] ?? match[0] ?? "";
+}
+
+function extractFromName(env: Env, firstName: string, lastName: string): string | null {
+  return extractFromText(env, "name", getNameSourceText(env, firstName, lastName));
 }
 
 function getDigitStyleInfo(char: string): { kind: "range"; zeroCodePoint: number } | {
@@ -242,23 +292,21 @@ function formatDigitsWithOriginalStyle(template: string, digits: string): string
   return formatted;
 }
 
-function setNameValueFromCount(
+function setTextValueFromCount(
   env: Env,
-  firstName: string,
-  lastName: string,
+  target: RegexTarget,
+  source: string,
   nextCount: number
 ): {
-  firstName: string;
-  lastName: string;
+  value: string;
   extracted: string;
 } | null {
-  const regex = createNameRegex(env);
+  const regex = createExtractRegex(env, target);
 
   if (!regex) {
     return null;
   }
 
-  const source = `${firstName}${lastName}`;
   const match = regex.exec(source);
 
   if (!match) {
@@ -269,17 +317,69 @@ function setNameValueFromCount(
   const matchedText = match[0] ?? "";
   const start = match.index + matchedText.indexOf(extracted);
   const end = start + extracted.length;
-  const firstNameLength = firstName.length;
   const formattedCount = formatDigitsWithOriginalStyle(extracted, String(nextCount));
+
+  return {
+    value: `${source.slice(0, start)}${formattedCount}${source.slice(end)}`,
+    extracted: formattedCount
+  };
+}
+
+function setNameValueFromCount(
+  env: Env,
+  firstName: string,
+  lastName: string,
+  nextCount: number
+): {
+  firstName: string;
+  lastName: string;
+  extracted: string;
+} | null {
+  const regex = createExtractRegex(env, "name");
+  const sourceType = getNameExtractSource(env);
+
+  if (!regex) {
+    return null;
+  }
+
+  const source = getNameSourceText(env, firstName, lastName);
+  const match = regex.exec(source);
+
+  if (!match) {
+    return null;
+  }
+
+  const matchedText = match[0] ?? "";
+  const extracted = match[1] ?? match[0] ?? "";
+  const start = match.index + matchedText.indexOf(extracted);
+  const end = start + extracted.length;
+  const formattedCount = formatDigitsWithOriginalStyle(extracted, String(nextCount));
+
+  if (sourceType === "first_name") {
+    return {
+      firstName: `${firstName.slice(0, start)}${formattedCount}${firstName.slice(end)}`,
+      lastName,
+      extracted: formattedCount
+    };
+  }
+
+  if (sourceType === "last_name") {
+    return {
+      firstName,
+      lastName: `${lastName.slice(0, start)}${formattedCount}${lastName.slice(end)}`,
+      extracted: formattedCount
+    };
+  }
+
+  const firstNameLength = firstName.length;
 
   if (start < firstNameLength && end > firstNameLength) {
     return null;
   }
 
   if (end <= firstNameLength) {
-    const nextFirstName = `${firstName.slice(0, start)}${formattedCount}${firstName.slice(end)}`;
     return {
-      firstName: nextFirstName,
+      firstName: `${firstName.slice(0, start)}${formattedCount}${firstName.slice(end)}`,
       lastName,
       extracted: formattedCount
     };
@@ -287,13 +387,93 @@ function setNameValueFromCount(
 
   const localStart = start - firstNameLength;
   const localEnd = end - firstNameLength;
-  const nextLastName = `${lastName.slice(0, localStart)}${formattedCount}${lastName.slice(localEnd)}`;
 
   return {
     firstName,
-    lastName: nextLastName,
+    lastName: `${lastName.slice(0, localStart)}${formattedCount}${lastName.slice(localEnd)}`,
     extracted: formattedCount
   };
+}
+
+async function syncCounterFromExtracted(env: Env, key: CounterKey, extracted: string): Promise<number | null> {
+  const normalizedDigits = normalizeUnicodeDigits(extracted);
+
+  if (!normalizedDigits) {
+    return null;
+  }
+
+  return setCounter(env, key, Number(normalizedDigits));
+}
+
+type MemberTagState = {
+  tag: string | null;
+  count: number | null;
+  extracted: string | null;
+  error: string | null;
+};
+
+async function getMemberTagState(env: Env, client: MtcuteClient): Promise<MemberTagState> {
+  const memberTagResult = await getCurrentMemberTag(env, client);
+  const memberTag = memberTagResult.tag;
+
+  if (!memberTag) {
+    return {
+      tag: null,
+      count: await getOptionalCounter(env, "memberTag"),
+      extracted: null,
+      error: memberTagResult.error
+    };
+  }
+
+  const extracted = extractFromText(env, "memberTag", memberTag);
+  const count = extracted
+    ? (await syncCounterFromExtracted(env, "memberTag", extracted)) ?? await getOptionalCounter(env, "memberTag")
+    : await getOptionalCounter(env, "memberTag");
+
+  return {
+    tag: memberTag,
+    count,
+    extracted,
+    error: memberTagResult.error
+  };
+}
+
+async function updateCurrentMemberTag(
+  env: Env,
+  client: MtcuteClient,
+  currentTag: string,
+  nextCount: number
+): Promise<{ tag: string; extracted: string } | { error: string }> {
+  const groupId = env.TG_GROUP_ID?.trim();
+
+  if (!groupId) {
+    return { error: "TG_GROUP_ID is missing." };
+  }
+
+  const nextTag = setTextValueFromCount(env, "memberTag", currentTag, nextCount);
+
+  if (!nextTag || !normalizeUnicodeDigits(nextTag.extracted)) {
+    return { error: "Unable to bump member tag digits with the current regex." };
+  }
+
+  try {
+    const resolvedGroupId = /^-?\d+$/.test(groupId) ? Number(groupId) : groupId;
+
+    await client.editChatMemberRank({
+      chatId: resolvedGroupId,
+      participantId: "me",
+      rank: nextTag.value
+    });
+
+    return {
+      tag: nextTag.value,
+      extracted: nextTag.extracted
+    };
+  } catch (error) {
+    console.error("Failed to update current member tag:", error);
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    return { error: message };
+  }
 }
 
 async function getCurrentResult(
@@ -303,28 +483,18 @@ async function getCurrentResult(
   lastName: string
 ): Promise<WorkerResponseBody | Response> {
   const extracted = extractFromName(env, firstName, lastName);
-
-  if (extracted === null) {
-    return new Response("NAME_EXTRACT_REGEX is missing.", { status: 500 });
-  }
-
-  const normalizedDigits = normalizeUnicodeDigits(extracted);
-
-  if (!normalizedDigits) {
-    return new Response("Extracted text does not contain a supported Unicode number.", {
-      status: 400
-    });
-  }
-
-  const count = await setCounter(env, Number(normalizedDigits));
-  const {
-    tag: memberTag
-  } = await getCurrentMemberTag(env, client);
+  const count = extracted
+    ? (await syncCounterFromExtracted(env, "name", extracted)) ?? await getOptionalCounter(env, "name")
+    : await getOptionalCounter(env, "name");
+  const memberTagState = await getMemberTagState(env, client);
 
   return {
     count,
     extracted,
-    memberTag
+    memberTag: memberTagState.tag,
+    memberTagCount: memberTagState.count,
+    memberTagExtracted: memberTagState.extracted,
+    memberTagError: memberTagState.error
   };
 }
 
@@ -335,40 +505,54 @@ async function bumpProfileAndCounter(
   lastName: string
 ): Promise<WorkerResponseBody | Response> {
   const currentNameValue = extractFromName(env, firstName, lastName);
+  let count = await getOptionalCounter(env, "name");
+  let extracted = currentNameValue;
 
-  if (currentNameValue === null) {
-    return new Response("NAME_EXTRACT_REGEX is missing.", { status: 500 });
+  if (currentNameValue && normalizeUnicodeDigits(currentNameValue)) {
+    const nextCount = await incrementCounter(env, "name");
+    const nextName = setNameValueFromCount(env, firstName, lastName, nextCount);
+
+    if (nextName !== null) {
+      await client.updateProfile({
+        firstName: nextName.firstName,
+        lastName: nextName.lastName
+      });
+
+      count = nextCount;
+      extracted = nextName.extracted;
+    } else {
+      await setCounter(env, "name", nextCount - 1);
+    }
   }
 
-  if (!normalizeUnicodeDigits(currentNameValue)) {
-    return new Response("Unable to bump nickname digits with the current regex.", {
-      status: 400
-    });
+  const memberTagState = await getMemberTagState(env, client);
+  let memberTag = memberTagState.tag;
+  let memberTagCount = memberTagState.count;
+  let memberTagExtracted = memberTagState.extracted;
+  let memberTagError = memberTagState.error;
+
+  if (memberTagState.tag && memberTagState.extracted && normalizeUnicodeDigits(memberTagState.extracted)) {
+    const nextMemberTagCount = await incrementCounter(env, "memberTag");
+    const nextMemberTag = await updateCurrentMemberTag(env, client, memberTagState.tag, nextMemberTagCount);
+
+    if ("error" in nextMemberTag) {
+      await setCounter(env, "memberTag", nextMemberTagCount - 1);
+      memberTagError = nextMemberTag.error;
+    } else {
+      memberTag = nextMemberTag.tag;
+      memberTagCount = nextMemberTagCount;
+      memberTagExtracted = nextMemberTag.extracted;
+      memberTagError = null;
+    }
   }
-
-  const count = await incrementCounter(env);
-  const nextName = setNameValueFromCount(env, firstName, lastName, count);
-
-  if (nextName === null) {
-    await setCounter(env, count - 1);
-    return new Response("Unable to bump nickname digits with the current regex.", {
-      status: 400
-    });
-  }
-
-  await client.updateProfile({
-    firstName: nextName.firstName,
-    lastName: nextName.lastName
-  });
-
-  const {
-    tag: memberTag
-  } = await getCurrentMemberTag(env, client);
 
   return {
     count,
-    extracted: nextName.extracted,
-    memberTag
+    extracted,
+    memberTag,
+    memberTagCount,
+    memberTagExtracted,
+    memberTagError
   };
 }
 
@@ -533,9 +717,11 @@ export class Counter {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    const key = url.searchParams.get("key")?.trim() || "name";
+    const storageKey = `count:${key}`;
 
     if (request.method === "GET" && url.pathname === "/value") {
-      const count = (await this.state.storage.get<number>("count")) ?? 0;
+      const count = (await this.state.storage.get<number>(storageKey)) ?? 0;
       return Response.json({ count } satisfies CounterState);
     }
 
@@ -547,16 +733,16 @@ export class Counter {
         return new Response("Invalid counter value.", { status: 400 });
       }
 
-      await this.state.storage.put("count", nextCount);
+      await this.state.storage.put(storageKey, nextCount);
 
       return Response.json({ count: nextCount } satisfies CounterState);
     }
 
     if (request.method === "POST" && url.pathname === "/increment") {
-      const current = (await this.state.storage.get<number>("count")) ?? 0;
+      const current = (await this.state.storage.get<number>(storageKey)) ?? 0;
       const count = current + 1;
 
-      await this.state.storage.put("count", count);
+      await this.state.storage.put(storageKey, count);
 
       return Response.json({ count } satisfies CounterState);
     }
