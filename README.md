@@ -1,119 +1,119 @@
-# mtcute Telegram 用户昵称同步 Worker
+# tg-tagauto
 
-这个示例使用 TypeScript + `mtcute` 在 Cloudflare Worker 中读取 Telegram 用户账号信息，并同步昵称里的数字到 Durable Object 计数器。
+基于 `mtcute` 和 Cloudflare Workers 的 Telegram 自动计数工具。它会读取昵称或群头衔中的数字，和 Durable Object 里的计数器同步，并支持手动或定时递增。
 
-当前版本已从 `GramJS` 迁移到 `mtcute`。
+## 代码结构
 
-Worker 端现在只接受 `mtcute` 原生 `TG_SESSION`。如果你手里还是旧的 `GramJS` session，可以先在本地执行一次 `npm run generate:session`，脚本会自动转换并把新的 `mtcute` session 写回 `.env`。
+- `src/worker.ts`：Worker 入口，只保留 HTTP/cron 编排。
+- `src/telegram.ts`：Telegram 客户端、授权检查、群头衔读写。
+- `src/counter.ts`：Durable Object 计数器访问封装。
+- `src/extract.ts`：正则提取和字符串替换。
+- `src/digits.ts`：Unicode 数字归一化与原样式格式化。
+- `src/generate-session.ts`：本地登录并生成 `TG_SESSION`。
 
-## 使用方法
+## Telegram API 凭据申请
 
-1. 安装依赖：
+项目依赖 Telegram 官方提供的 `api_id` 和 `api_hash` 访问 MTProto。申请步骤如下：
+
+1. 登录 `https://my.telegram.org`。
+2. 使用你的 Telegram 账号收取验证码并登录。
+3. 进入 `API development tools`。
+4. 创建一个应用，常见字段可按下面填写：
+
+- `App title`：随便填一个你能识别的名字，例如 `tg-tagauto`
+- `Short name`：简短英文标识，例如 `tgtagauto`
+- `Platform`：任选一个接近的客户端类型，例如 `Desktop`
+- `Description`：简单写用途，例如 `Cloudflare worker automation`
+
+创建完成后页面会显示：
+
+- `App api_id`：对应本项目的 `TG_API_ID`
+- `App api_hash`：对应本项目的 `TG_API_HASH`
+
+使用方式：
+
+- 本地放进 `.env`，用于执行 `npm run generate:session`
+- 本地调试时同步放进 `.dev.vars`
+- 部署到 Cloudflare 后分别配置成 Worker secret `TG_API_ID` 和 `TG_API_HASH`
+
+注意：
+
+- `api_id` / `api_hash` 绑定的是你的 Telegram 开发应用，不是 BotFather 的 bot token，二者不能混用。
+- 这两个值等同于账号级凭据，泄露后别人可以借助你的应用身份发起登录流程，不要提交到仓库。
+- 如果怀疑泄露，应尽快回到 `my.telegram.org` 重新生成或更换应用。
+
+## 部署与使用
+
+1. 安装依赖。
 
 ```bash
 npm install
 ```
 
-2. 复制环境变量模板并填写你自己的 Telegram API 信息：
+2. 初始化本地环境文件。
 
 ```bash
 copy .env.example .env
+copy .env.example .dev.vars
 ```
 
-需要在 Telegram 官方开发者平台申请：
-
-- `TG_API_ID`
-- `TG_API_HASH`
-- `TG_SESSION`（需要先在本地生成，再配置到 Worker Secret）
-- `NAME_EXTRACT_REGEX`（可选，用于从昵称提取字符）
-- `NAME_EXTRACT_SOURCE`（可选，指定从哪里提取昵称，支持 `first_name`、`last_name`、`full_name`，默认 `full_name`）
-- `MEMBER_TAG_EXTRACT_REGEX`（可选，用于从 member tag 中提取字符）
-- `TG_GROUP_ID`（可选，用于在 `GET /` 时读取当前账号在这个群里的 member tag）
-
-3. 本地生成 `TG_SESSION`：
+3. 在 `.env` 中填写 `TG_API_ID` 和 `TG_API_HASH`，然后生成登录 session。
 
 ```bash
 npm run generate:session
 ```
 
-登录成功后，脚本会打印一个 `mtcute` session 字符串，把它保存为 Cloudflare Worker 的 `TG_SESSION` Secret。
+脚本会交互式登录 Telegram，并把导出的 mtcute 原生 `TG_SESSION` 写回 `.env`。如果你原来保存的是 GramJS session，脚本会先尝试转换。
 
-如果 `.env` 里已经放了旧的 `GramJS` session，脚本会先尝试导入旧 session，再导出新的 `mtcute` session，并直接更新 `.env` 里的 `TG_SESSION`。
-
-4. 本地检查 Worker 构建：
+4. 把相同配置写入 `.dev.vars`，本地检查构建。
 
 ```bash
 npm run build
 npm run worker:check
 ```
 
-5. 本地调试 Worker：
-
-先用同一个模板生成 Worker 本地变量文件：
+5. 部署到 Cloudflare Worker。
 
 ```bash
-copy .env.example .dev.vars
+wrangler secret put TG_API_ID
+wrangler secret put TG_API_HASH
+wrangler secret put TG_SESSION
+wrangler deploy
 ```
 
-然后填入：
+`COUNTER` Durable Object 已在 [wrangler.toml](/D:/codes/tg-tagauto/wrangler.toml) 中声明。当前 cron 为 `0 16 * * *`，对应北京时间每天 `00:00`。
+
+## 接口说明
+
+- `GET /`：读取昵称和群头衔，提取数字并同步计数器。
+- `POST /bump`：对昵称和群头衔中的数字各自加一，无法匹配时跳过。
+- `scheduled`：执行与 `POST /bump` 相同的流程。
+
+返回字段：
+
+- `count`：昵称计数器。
+- `extracted`：从昵称提取出的文本。
+- `memberTag`：当前群头衔。
+- `memberTagCount`：群头衔计数器。
+- `memberTagExtracted`：从群头衔提取出的文本。
+- `memberTagError`：群头衔读取或写入时的错误。
+
+## 环境变量
+
+必填：
 
 - `TG_API_ID`
 - `TG_API_HASH`
 - `TG_SESSION`
+
+可选：
+
 - `NAME_EXTRACT_REGEX`
 - `NAME_EXTRACT_SOURCE`
 - `MEMBER_TAG_EXTRACT_REGEX`
+- `TG_GROUP_ID`
 
-```bash
-npm run worker:dev
-```
-
-## Worker 环境变量
-
-需要在 Cloudflare Worker 中配置这几个绑定或 Secret：
-
-- `TG_API_ID`
-- `TG_API_HASH`
-- `TG_SESSION`
-- `NAME_EXTRACT_REGEX`
-- `NAME_EXTRACT_SOURCE`
-- `TG_GROUP_ID`（可选）
-- `COUNTER`（Durable Object，已在 `wrangler.toml` 中声明）
-
-## 功能
-
-`GET /` 会读取 Telegram 当前昵称中的数字，并把计数器同步为该值后返回：
-
-- `count`
-- `extracted`
-- `memberTag`
-- `memberTagCount`
-- `memberTagExtracted`
-- `memberTagError`
-
-其中：
-
-- `extracted` 是对 `NAME_EXTRACT_SOURCE` 指定来源执行 `NAME_EXTRACT_REGEX` 后得到的结果；没匹配到时为 `null`
-- `count` 会被同步为昵称里提取出的 Unicode 数字对应的普通数字
-- `memberTag` 会读取 `TG_GROUP_ID` 指向的群，并返回当前账号在这个群里的自定义头衔
-- `memberTagExtracted` 会对 `memberTag` 执行 `MEMBER_TAG_EXTRACT_REGEX`；没匹配到时为 `null`
-- `memberTagCount` 会同步为 `memberTag` 里提取出的 Unicode 数字对应的普通数字
-- `memberTagError` 会返回读取或更新成员 tag 时遇到的错误
-- 如果正则包含捕获组，优先返回第一个捕获组；否则返回整个匹配内容
-- 如果没有配置对应正则，或者没匹配到数字，不会报错，也不会修改对应计数器
-
-`POST /bump` 会执行两个动作：
-
-- 昵称能匹配到 `NAME_EXTRACT_REGEX` 且提取结果包含数字时，才会把昵称计数器 `+1` 并写回昵称
-- 成员 tag 能匹配到 `MEMBER_TAG_EXTRACT_REGEX` 且提取结果包含数字时，才会把成员 tag 计数器 `+1` 并写回成员 tag
-- 任意一边没匹配到时，会直接跳过，不做任何操作
-
-此外，Worker 已配置定时任务，会在每天北京时间 `00:00` 自动执行一次和 `POST /bump` 相同的逻辑。Cloudflare Cron 使用 UTC，因此配置值是 `0 16 * * *`，对应 UTC+8 的次日 `00:00`。
-
-例如：
-
-- `Berry²` bump 后会变成 `Berry³`
-- `Berry¹²` bump 后会变成 `Berry¹³`
+`NAME_EXTRACT_SOURCE` 支持 `first_name`、`last_name`、`full_name`，默认 `full_name`。
 
 示例：
 
@@ -121,16 +121,15 @@ npm run worker:dev
 NAME_EXTRACT_REGEX=([⁰¹²³⁴⁵⁶⁷⁸⁹]+)$
 NAME_EXTRACT_SOURCE=full_name
 MEMBER_TAG_EXTRACT_REGEX=([⁰¹²³⁴⁵⁶⁷⁸⁹]+)$
+TG_GROUP_ID=-1001234567890
 ```
 
-如果 `NAME_EXTRACT_SOURCE=full_name` 且姓名是 `Berry²`，则会提取末尾的上标数字。
+## 注意事项
 
-## 限制
-
-Cloudflare Worker 不能交互式输入手机号验证码，所以首次登录必须在本地执行 `npm run generate:session`，再把得到的 `TG_SESSION` 配到 Worker。
-
-## 关于 WASM
-
-项目当前仍然依赖 `@mtcute/wasm`，不能删除。
-
-原因是 Worker 端使用的 `@mtcute/web` 需要它提供 MTProto 所需的加密与压缩实现。当前代码里已经显式加载 wasm 模块，避免 `wrangler dev` 下的资源定位问题。
+- 首次登录必须在本地执行 `npm run generate:session`，Worker 里不能交互式输入验证码。
+- Worker 端只接受 mtcute 原生 `TG_SESSION`。
+- 正则如果带捕获组，优先使用第一个捕获组；否则使用整个匹配结果。
+- 只有提取结果里存在数字时，才会同步或递增计数器。
+- `full_name` 模式下，匹配范围不要跨越名和姓的边界，否则不会回写。
+- 群头衔功能依赖 `TG_GROUP_ID`，并且账号需要具备读取/修改对应头衔的权限。
+- `@mtcute/wasm` 仍然是必须依赖，Worker 侧的加密与压缩实现要用到它。

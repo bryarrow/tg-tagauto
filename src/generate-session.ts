@@ -1,7 +1,7 @@
-import { readFile, writeFile } from "node:fs/promises";
 import dotenv from "dotenv";
 import { convertFromGramjsSession } from "@mtcute/convert";
 import { TelegramClient } from "@mtcute/node";
+import { persistSessionToEnv } from "./session-env";
 
 dotenv.config();
 
@@ -15,38 +15,6 @@ if (!apiId || !apiHash) {
 }
 
 const requiredApiHash: string = apiHash;
-
-function escapeEnvValue(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n");
-}
-
-async function persistSessionToEnv(session: string): Promise<void> {
-  const envPath = ".env";
-  const nextLine = `TG_SESSION=${escapeEnvValue(session)}`;
-  let content = "";
-
-  try {
-    content = await readFile(envPath, "utf8");
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-
-    if (nodeError.code !== "ENOENT") {
-      throw error;
-    }
-  }
-
-  if (!content) {
-    await writeFile(envPath, `${nextLine}\n`, "utf8");
-    return;
-  }
-
-  const tgSessionPattern = /^TG_SESSION=.*$/m;
-  const nextContent = tgSessionPattern.test(content)
-    ? content.replace(tgSessionPattern, nextLine)
-    : `${content.trimEnd()}\n${nextLine}\n`;
-
-  await writeFile(envPath, nextContent, "utf8");
-}
 
 async function importSessionWithFallback(client: TelegramClient, session: string): Promise<void> {
   try {
