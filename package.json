@@ -16,7 +16,8 @@
     "@mtcute/wasm": "^0.29.0",
     "@mtcute/web": "^0.29.5",
     "buffer": "^6.0.3",
-    "dotenv": "^16.6.1"
+    "dotenv": "^16.6.1",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260405.1",
