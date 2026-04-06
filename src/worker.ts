@@ -1,30 +1,26 @@
 /// <reference types="@cloudflare/workers-types" />
+/// <reference path="./wasm.d.ts" />
 
-import { Buffer as BufferPolyfill } from "buffer";
-import type { TelegramClient as GramJsClient } from "telegram";
+import mtcuteWasmModule from "@mtcute/wasm/mtcute.wasm";
+import { BaseTelegramClient as CoreBaseTelegramClient, TelegramClient as CoreTelegramClient } from "@mtcute/core/client.js";
+import { MemoryStorage, WebCryptoProvider, WebPlatform, WebSocketTransport } from "@mtcute/web";
 
 interface Env {
   TG_API_ID: string;
   TG_API_HASH: string;
   TG_SESSION: string;
   NAME_EXTRACT_REGEX: string;
+  TG_GROUP_ID?: string;
   COUNTER: DurableObjectNamespace;
 }
 
-interface WorkerShimWindow {
-  location?: {
-    protocol?: string;
-  };
-  addEventListener?: (_type: string, _listener: EventListenerOrEventListenerObject) => void;
-  removeEventListener?: (_type: string, _listener: EventListenerOrEventListenerObject) => void;
-}
+type MtcuteClient = CoreTelegramClient;
 
 type CreateClientResult =
   | { ok: false; error: Response }
   | {
       ok: true;
-      client: GramJsClient;
-      Api: typeof import("telegram").Api;
+      client: MtcuteClient;
     };
 
 interface CounterState {
@@ -34,48 +30,10 @@ interface CounterState {
 interface WorkerResponseBody {
   count: number;
   extracted: string;
-}
-
-function ensureWorkerShims(): void {
-  const runtime = globalThis as typeof globalThis & {
-    Buffer?: typeof BufferPolyfill;
-  };
-  const bag = globalThis as Record<string, unknown>;
-
-  if (!runtime.Buffer) {
-    runtime.Buffer = BufferPolyfill;
-  }
-
-  let shimWindow = bag.window as WorkerShimWindow | undefined;
-
-  if (!shimWindow) {
-    shimWindow = {};
-    Object.defineProperty(globalThis, "window", {
-      value: shimWindow,
-      configurable: true,
-      writable: true
-    });
-  }
-
-  const location = shimWindow.location ?? (shimWindow.location = {});
-
-  if (!location.protocol) {
-    location.protocol = "https:";
-  }
-
-  if (typeof shimWindow.addEventListener !== "function") {
-    shimWindow.addEventListener = () => undefined;
-  }
-
-  if (typeof shimWindow.removeEventListener !== "function") {
-    shimWindow.removeEventListener = () => undefined;
-  }
+  memberTag: string | null;
 }
 
 async function createClient(env: Env): Promise<CreateClientResult> {
-  const { TelegramClient, Api } = await import("telegram");
-  const { StringSession } = await import("telegram/sessions");
-
   const apiId = Number(env.TG_API_ID);
   const apiHash = env.TG_API_HASH?.trim();
   const session = env.TG_SESSION?.trim();
@@ -89,17 +47,37 @@ async function createClient(env: Env): Promise<CreateClientResult> {
     };
   }
 
-  const client = new TelegramClient(new StringSession(session), apiId, apiHash, {
-    connectionRetries: 5,
-    useWSS: true
+  const client = new CoreTelegramClient({
+    client: new CoreBaseTelegramClient({
+      apiId,
+      apiHash,
+      storage: new MemoryStorage(),
+      crypto: new WebCryptoProvider({
+        wasmInput: mtcuteWasmModule
+      }),
+      transport: new WebSocketTransport(),
+      platform: new WebPlatform(),
+      updates: false,
+      disableUpdates: true
+    }),
+    disableUpdates: true
   });
 
-  if (client.session.dcId) {
-    const webDc = await client.getDC(client.session.dcId, false, true);
-    client.session.setDC(webDc.id, webDc.ipAddress, webDc.port);
+  try {
+    await client.importSession(session);
+  } catch (error) {
+    console.error("Failed to import Telegram session:", error);
+    await client.destroy();
+
+    return {
+      ok: false,
+      error: new Response("TG_SESSION is invalid or cannot be imported.", {
+        status: 400
+      })
+    };
   }
 
-  return { ok: true, client, Api };
+  return { ok: true, client };
 }
 
 async function getCounter(env: Env): Promise<number> {
@@ -138,7 +116,7 @@ async function incrementCounter(env: Env): Promise<number> {
   const id = env.COUNTER.idFromName("global");
   const stub = env.COUNTER.get(id);
   const response = await stub.fetch("https://counter/increment", {
-    method: "POST",
+    method: "POST"
   });
 
   if (!response.ok) {
@@ -320,6 +298,7 @@ function setNameValueFromCount(
 
 async function getCurrentResult(
   env: Env,
+  client: MtcuteClient,
   firstName: string,
   lastName: string
 ): Promise<WorkerResponseBody | Response> {
@@ -338,17 +317,20 @@ async function getCurrentResult(
   }
 
   const count = await setCounter(env, Number(normalizedDigits));
+  const {
+    tag: memberTag
+  } = await getCurrentMemberTag(env, client);
 
   return {
     count,
-    extracted
+    extracted,
+    memberTag
   };
 }
 
 async function bumpProfileAndCounter(
   env: Env,
-  client: GramJsClient,
-  Api: typeof import("telegram").Api,
+  client: MtcuteClient,
   firstName: string,
   lastName: string
 ): Promise<WorkerResponseBody | Response> {
@@ -374,48 +356,80 @@ async function bumpProfileAndCounter(
     });
   }
 
-  await client.invoke(
-    new Api.account.UpdateProfile({
-      firstName: nextName.firstName,
-      lastName: nextName.lastName
-    })
-  );
+  await client.updateProfile({
+    firstName: nextName.firstName,
+    lastName: nextName.lastName
+  });
+
+  const {
+    tag: memberTag
+  } = await getCurrentMemberTag(env, client);
 
   return {
     count,
-    extracted: nextName.extracted
+    extracted: nextName.extracted,
+    memberTag
   };
 }
 
-async function runBump(env: Env): Promise<WorkerResponseBody | Response> {
-  ensureWorkerShims();
+async function getAuthorizedUser(client: MtcuteClient): Promise<Awaited<ReturnType<MtcuteClient["getMe"]>> | null> {
+  try {
+    return await client.getMe();
+  } catch (error) {
+    console.error("Failed to fetch current Telegram user:", error);
+    return null;
+  }
+}
 
+async function getCurrentMemberTag(
+  env: Env,
+  client: MtcuteClient
+): Promise<{ tag: string | null; source: string | null; error: string | null }> {
+  const groupId = env.TG_GROUP_ID?.trim();
+
+  if (!groupId) {
+    return { tag: null, source: null, error: "TG_GROUP_ID is missing." };
+  }
+
+  try {
+    const resolvedGroupId = /^-?\d+$/.test(groupId) ? Number(groupId) : groupId;
+    const member = await client.getChatMember({
+      chatId: resolvedGroupId,
+      userId: "me"
+    });
+
+    return {
+      tag: member?.title?.trim() || null,
+      source: null,
+      error: null
+    };
+  } catch (error) {
+    console.error("Failed to fetch current member tag:", error);
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    return { tag: null, source: null, error: message };
+  }
+}
+
+async function runBump(env: Env): Promise<WorkerResponseBody | Response> {
   const clientResult = await createClient(env);
 
   if (!clientResult.ok) {
     return clientResult.error;
   }
 
-  const { client, Api } = clientResult;
+  const { client } = clientResult;
 
   try {
     await client.connect();
 
-    if (!(await client.isUserAuthorized())) {
+    const me = await getAuthorizedUser(client);
+
+    if (!me) {
       console.error("Worker failed: TG_SESSION is not authorized.");
       return new Response("TG_SESSION is not authorized.", { status: 401 });
     }
 
-    const me = await client.getMe();
-
-    if (!(me instanceof Api.User)) {
-      console.error("Worker failed: session does not belong to a Telegram user account.");
-      return new Response("The session does not belong to a Telegram user account.", {
-        status: 400
-      });
-    }
-
-    return await bumpProfileAndCounter(env, client, Api, me.firstName ?? "", me.lastName ?? "");
+    return await bumpProfileAndCounter(env, client, me.firstName ?? "", me.lastName ?? "");
   } catch (error) {
     console.error("Worker failed:", error);
     return new Response("Failed to bump Telegram nickname. Check Worker logs.", {
@@ -423,6 +437,7 @@ async function runBump(env: Env): Promise<WorkerResponseBody | Response> {
     });
   } finally {
     await client.disconnect();
+    await client.destroy();
   }
 }
 
@@ -430,34 +445,24 @@ const fetchHandler: ExportedHandlerFetchHandler<Env> = async (
   request: Request,
   env: Env
 ): Promise<Response> => {
-  ensureWorkerShims();
-
   const clientResult = await createClient(env);
 
   if (!clientResult.ok) {
     return clientResult.error;
   }
 
-  const { client, Api } = clientResult;
+  const { client } = clientResult;
 
   let response: Response;
 
   try {
     await client.connect();
 
-    if (!(await client.isUserAuthorized())) {
+    const me = await getAuthorizedUser(client);
+
+    if (!me) {
       console.error("Worker failed: TG_SESSION is not authorized.");
       response = new Response("TG_SESSION is not authorized.", { status: 401 });
-      return response;
-    }
-
-    const me = await client.getMe();
-
-    if (!(me instanceof Api.User)) {
-      console.error("Worker failed: session does not belong to a Telegram user account.");
-      response = new Response("The session does not belong to a Telegram user account.", {
-        status: 400
-      });
       return response;
     }
 
@@ -465,9 +470,9 @@ const fetchHandler: ExportedHandlerFetchHandler<Env> = async (
     let result: WorkerResponseBody | Response;
 
     if (request.method === "POST" && url.pathname === "/bump") {
-      result = await bumpProfileAndCounter(env, client, Api, me.firstName ?? "", me.lastName ?? "");
+      result = await bumpProfileAndCounter(env, client, me.firstName ?? "", me.lastName ?? "");
     } else {
-      result = await getCurrentResult(env, me.firstName ?? "", me.lastName ?? "");
+      result = await getCurrentResult(env, client, me.firstName ?? "", me.lastName ?? "");
     }
 
     if (result instanceof Response) {
@@ -490,6 +495,7 @@ const fetchHandler: ExportedHandlerFetchHandler<Env> = async (
     return response;
   } finally {
     await client.disconnect();
+    await client.destroy();
   }
 };
 

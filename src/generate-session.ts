@@ -1,14 +1,12 @@
-import readline from "readline/promises";
-import { stdin, stdout } from "process";
-
+import { readFile, writeFile } from "node:fs/promises";
 import dotenv from "dotenv";
-import { TelegramClient } from "telegram";
-import { StringSession } from "telegram/sessions";
+import { convertFromGramjsSession } from "@mtcute/convert";
+import { TelegramClient } from "@mtcute/node";
 
 dotenv.config();
 
 const apiId = Number(process.env.TG_API_ID);
-const apiHash = process.env.TG_API_HASH;
+const apiHash = process.env.TG_API_HASH?.trim();
 const savedSession = (process.env.TG_SESSION ?? "").trim();
 
 if (!apiId || !apiHash) {
@@ -16,37 +14,82 @@ if (!apiId || !apiHash) {
   process.exit(1);
 }
 
-const telegramApiHash = apiHash;
+const requiredApiHash: string = apiHash;
 
-async function prompt(question: string): Promise<string> {
-  const rl = readline.createInterface({ input: stdin, output: stdout });
+function escapeEnvValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n");
+}
+
+async function persistSessionToEnv(session: string): Promise<void> {
+  const envPath = ".env";
+  const nextLine = `TG_SESSION=${escapeEnvValue(session)}`;
+  let content = "";
+
   try {
-    return (await rl.question(question)).trim();
-  } finally {
-    rl.close();
+    content = await readFile(envPath, "utf8");
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+
+    if (nodeError.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  if (!content) {
+    await writeFile(envPath, `${nextLine}\n`, "utf8");
+    return;
+  }
+
+  const tgSessionPattern = /^TG_SESSION=.*$/m;
+  const nextContent = tgSessionPattern.test(content)
+    ? content.replace(tgSessionPattern, nextLine)
+    : `${content.trimEnd()}\n${nextLine}\n`;
+
+  await writeFile(envPath, nextContent, "utf8");
+}
+
+async function importSessionWithFallback(client: TelegramClient, session: string): Promise<void> {
+  try {
+    await client.importSession(session);
+    return;
+  } catch {
+    await client.importSession(convertFromGramjsSession(session), true);
   }
 }
 
 async function main(): Promise<void> {
-  const stringSession = new StringSession(savedSession);
-  const client = new TelegramClient(stringSession, apiId, telegramApiHash, {
-    connectionRetries: 5
+  const client = new TelegramClient({
+    apiId,
+    apiHash: requiredApiHash,
+    storage: ":memory:"
   });
 
   try {
-    await client.start({
-      phoneNumber: async () => prompt("Phone number (e.g. +8613800000000): "),
-      password: async () => prompt("2FA password (leave empty if not enabled): "),
-      phoneCode: async () => prompt("Login code: "),
-      onError: (error: Error) => {
-        console.error("Login failed:", error.message || error);
+    if (savedSession) {
+      await importSessionWithFallback(client, savedSession);
+    }
+
+    const me = await client.start({
+      phone: async () => client.input("Phone number (e.g. +8613800000000): "),
+      password: async () => client.input("2FA password (leave empty if not enabled): "),
+      code: async () => client.input("Login code: "),
+      invalidCodeCallback: async (type) => {
+        console.error(`${type} is invalid, please try again.`);
       }
     });
 
+    const exportedSession = await client.exportSession();
+
+    await persistSessionToEnv(exportedSession);
+    process.env.TG_SESSION = exportedSession;
+
+    console.log(`Logged in as ${me.displayName}`);
+    console.log("Updated .env with the mtcute-native TG_SESSION.");
     console.log("Copy this into Cloudflare Worker secret TG_SESSION:");
-    console.log(stringSession.save());
+    console.log(exportedSession);
   } finally {
     await client.disconnect();
+    await client.destroy();
   }
 }
 
